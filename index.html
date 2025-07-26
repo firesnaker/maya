@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+
+<html lang="en">
+
+	<head>
+		<meta charset="UTF-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+		<title>Basic LLM Chatbot</title>
+
+		<!-- Tailwind CSS CDN for quick styling -->
+		<script src="https://cdn.tailwindcss.com/"></script>
+		<link rel="stylesheet" type="text/css" href="./style.css"></link>
+	</head>
+
+	<body>
+		<div class="chat-container">
+			<div class="chat-history" id="chat-history">
+			<!-- Chat messages will appear here -->
+				<div class="ai-message message">Hello! How can I assist you today?</div>
+			</div>
+
+			<div class="chat-input-area">
+				<input type="text" id="user-input" class="chat-input" placeholder="Type your message...">
+				<button id="send-button" class="send-button">Send</button>
+			</div>
+		</div>
+
+		<script src="./main.js"></script>
+	</body>
+</html>

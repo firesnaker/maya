@@ -1,103 +1,154 @@
-import Image from "next/image";
+'use client';
+
+import { useState, useRef, useEffect } from 'react';
 
 export default function Home() {
-  return (
-    <div className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="font-mono list-inside list-decimal text-sm/6 text-center sm:text-left">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] font-mono font-semibold px-1 py-0.5 rounded">
-              app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
+  const [chatHistory, setChatHistory] = useState([
+    { role: 'ai', text: 'Hello! How can I assist you today?' },
+  ]);
+  const [userInput, setUserInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const chatHistoryRef = useRef(null);
+  
+  // The API key is now loaded from the environment
+  const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
-        </div>
-      </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
-    </div>
+  // Function to scroll the chat history to the bottom
+  const scrollToBottom = () => {
+    if (chatHistoryRef.current) {
+      chatHistoryRef.current.scrollTop = chatHistoryRef.current.scrollHeight;
+    }
+  };
+
+  // Automatically scroll to the bottom whenever chatHistory or isLoading changes
+  useEffect(() => {
+    scrollToBottom();
+  }, [chatHistory, isLoading]);
+
+  // Function to send a message to the LLM
+  const sendMessage = async () => {
+    if (userInput.trim() === '') {
+      return;
+    }
+    
+    // Check if the API key is available
+    if (!apiKey) {
+      console.error("API key is not configured. Please set NEXT_PUBLIC_GEMINI_API_KEY in your .env.local file.");
+      return;
+    }
+
+    const userMessage = { role: 'user', text: userInput.trim() };
+    const newChatHistory = [...chatHistory, userMessage];
+
+    setChatHistory(newChatHistory);
+    setUserInput('');
+    setIsLoading(true);
+
+    try {
+      const payload = {
+        contents: newChatHistory.map((msg) => ({
+          role: msg.role === 'user' ? 'user' : 'model',
+          parts: [{ text: msg.text }],
+        })),
+        generationConfig: {
+          temperature: 0.7,
+          topP: 0.95,
+          topK: 40,
+          maxOutputTokens: 1024,
+        },
+      };
+
+      //Use the environment variable here
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(
+          `API error: ${response.status} - ${errorData.error.message}`
+        );
+      }
+
+      const result = await response.json();
+
+      if (
+        result.candidates &&
+        result.candidates.length > 0 &&
+        result.candidates[0].content &&
+        result.candidates[0].content.parts &&
+        result.candidates[0].content.parts.length > 0
+      ) {
+        const aiText = result.candidates[0].content.parts[0].text;
+        const aiMessage = { role: 'ai', text: aiText };
+        setChatHistory((currentHistory) => [...currentHistory, aiMessage]);
+      } else {
+        const errorMessage = {
+          role: 'ai',
+          text: "Sorry, I couldn't get a response from the AI.",
+        };
+        setChatHistory((currentHistory) => [...currentHistory, errorMessage]);
+        console.error('Unexpected API response structure:', result);
+      }
+    } catch (error) {
+      const errorMessage = {
+        role: 'ai',
+        text: 'An error occurred: ' + error.message,
+      };
+      setChatHistory((currentHistory) => [...currentHistory, errorMessage]);
+      console.error('Error communicating with LLM:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleKeyDown = (event) => {
+    if (event.key === 'Enter') {
+      sendMessage();
+    }
+  };
+
+  return (
+    <main className="font-sans bg-[#f0f2f5] flex justify-center items-center min-h-screen m-0">
+		<div className="bg-white rounded-[1rem] shadow-lg w-[90%] max-w-[600px] flex flex-col overflow-hidden min-h-[500px] max-h-[90vh]">
+			<div ref={chatHistoryRef} className="grow p-6 overflow-y-auto border-b border-solid border-gray-200 flex flex-col gap-3">
+				{chatHistory.map((message, index) => (
+				  <div key={index} className={`max-w-[80%] py-3 px-4 rounded-xl break-words ${
+                    message.role === 'user'
+					? 'bg-[#3b82f6] text-white self-end'
+					: 'bg-[#e2e8f0] text-[#333333] self-start'
+                  }`}>
+				    {message.text}
+                  </div>
+                ))}
+                
+                {isLoading && (
+				  <div className="loading-indicator self-start py-3 px-4 rounded-xl bg-[#e2e8f0] text-[#333333] italic opacity-80 animate-pulse">
+				    AI is thinking...
+				  </div>
+			    )}
+			</div>
+			
+			<div className="flex p-6 gap-3 items-center">
+				<input type="text" id="user-input" className="grow py-3 px-4 border-[1px] border-solid border-[#cbd5e1] rounded-xl outline-none text-base text-black focus:border-[#3b82f6] focus:shadow-[0_0_0_2px_rgba(59,130,246,0.25)]" placeholder="Type your message..." value={userInput}
+				  onChange={(e) => setUserInput(e.target.value)}
+				  onKeyDown={handleKeyDown}
+				  disabled={isLoading}></input>
+				<button
+				  onClick={sendMessage}
+				  className={`bg-[#3b82f6] text-white py-3 px-5 rounded-xl transition-colors duration-200 ease-in-out font-semibold border-none ${
+					isLoading
+					? 'opacity-50 cursor-not-allowed'
+					: 'hover:bg-[#2563eb] cursor-pointer'
+				  }`}
+				  disabled={isLoading}
+				>Send</button>
+			</div>
+		</div>
+    </main>
   );
 }

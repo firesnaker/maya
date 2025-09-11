@@ -59,39 +59,25 @@ async function sendMessage() {
 				}
 			};
 
-			// IMPORTANT: Leave apiKey as an empty string. Canvas will automatically provide it.
-			const apiKey = "";
-			const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
-			const response = await fetch(apiUrl, {
+			const response = await fetch('http://localhost:8080/chat', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify(payload)
+				body: JSON.stringify(payload),
 			});
 
 			if (!response.ok) {
 				const errorData = await response.json();
-				throw new Error(`API error: ${response.status} - ${errorData.error.message}`);
+				throw new Error(`Server error: ${response.status} - ${errorData.text}`);
 			}
 
 			const result = await response.json();
-			hideLoading(); // Hide loading indicator
-
-			if (result.candidates && result.candidates.length > 0 &&
-				result.candidates[0].content && result.candidates[0].content.parts &&
-				result.candidates[0].content.parts.length > 0) {
-
-				const aiText = result.candidates[0].content.parts[0].text;
-				addMessage(aiText, 'ai');
-				// Add AI response to chat history for LLM context
-				chatHistory.push({ role: "model", parts: [{ text: aiText }] });
-			} else {
-				addMessage("Sorry, I couldn't get a response from the AI.", 'ai');
-				console.error("Unexpected API response structure:", result);
-			}
+			hideLoading();
+			addMessage(result.text, 'ai');
+			chatHistory.push({ role: 'ai', text: result.text });
 		} catch (error) {
 			hideLoading(); // Hide loading indicator even on error
 			addMessage("An error occurred: " + error.message, 'ai');
-			console.error("Error communicating with LLM:", error);
+			console.error("Error communicating with backend:", error);
 		}
 	}
 

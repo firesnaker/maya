@@ -9,9 +9,6 @@ export default function Home() {
   const [userInput, setUserInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const chatHistoryRef = useRef(null);
-  
-  // The API key is now loaded from the environment
-  const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
 
   // Function to scroll the chat history to the bottom
   const scrollToBottom = () => {
@@ -28,12 +25,6 @@ export default function Home() {
   // Function to send a message to the LLM
   const sendMessage = async () => {
     if (userInput.trim() === '') {
-      return;
-    }
-    
-    // Check if the API key is available
-    if (!apiKey) {
-      console.error("API key is not configured. Please set NEXT_PUBLIC_GEMINI_API_KEY in your .env.local file.");
       return;
     }
 
@@ -58,10 +49,9 @@ export default function Home() {
         },
       };
 
-      //Use the environment variable here
-      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
-
-      const response = await fetch(apiUrl, {
+      // Now, we call the local Go backend instead of the Gemini API directly
+      const backendUrl = 'http://localhost:8080/chat';
+      const response = await fetch(backendUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -69,22 +59,13 @@ export default function Home() {
 
       if (!response.ok) {
         const errorData = await response.json();
-        throw new Error(
-          `API error: ${response.status} - ${errorData.error.message}`
-        );
+        throw new Error(`Server error: ${response.status} - ${errorData.text}`);
       }
 
       const result = await response.json();
 
-      if (
-        result.candidates &&
-        result.candidates.length > 0 &&
-        result.candidates[0].content &&
-        result.candidates[0].content.parts &&
-        result.candidates[0].content.parts.length > 0
-      ) {
-        const aiText = result.candidates[0].content.parts[0].text;
-        const aiMessage = { role: 'ai', text: aiText };
+      if (result.text) {
+        const aiMessage = { role: 'ai', text: result.text };
         setChatHistory((currentHistory) => [...currentHistory, aiMessage]);
       } else {
         const errorMessage = {
@@ -92,7 +73,7 @@ export default function Home() {
           text: "Sorry, I couldn't get a response from the AI.",
         };
         setChatHistory((currentHistory) => [...currentHistory, errorMessage]);
-        console.error('Unexpected API response structure:', result);
+        console.error('Unexpected backend response structure:', result);
       }
     } catch (error) {
       const errorMessage = {
@@ -100,7 +81,7 @@ export default function Home() {
         text: 'An error occurred: ' + error.message,
       };
       setChatHistory((currentHistory) => [...currentHistory, errorMessage]);
-      console.error('Error communicating with LLM:', error);
+      console.error('Error communicating with Go backend:', error);
     } finally {
       setIsLoading(false);
     }

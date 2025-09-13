@@ -11,43 +11,101 @@ import (
 	"time"
 )
 
-// The API key for Gemini. This should be set as an environment variable.
-var apiKey = os.Getenv("GEMINI_API_KEY")
+// Define API keys for different models from environment variables.
+var geminiAPIKey = os.Getenv("GEMINI_API_KEY")
+var llamaAPIKey = os.Getenv("LLAMA_API_KEY")
+var claudeAPIKey = os.Getenv("CLAUDE_API_KEY")
+var chatGPTAPIKey = os.Getenv("CHATGPT_API_KEY")
 
-// RequestPayload represents the structure of the incoming request from the client.
-type RequestPayload struct {
-	Contents []Message `json:"contents"`
+// ClientRequestPayload represents the structure of the incoming request from the client,
+// now including a field to specify the model.
+type ClientRequestPayload struct {
+	ModelName string `json:"modelName"`
+	Contents []struct {
+		Role string `json:"role"`
+		Text string `json:"text"`
+	} `json:"contents"`
 }
 
-// Message represents a single message in the chat history.
-type Message struct {
-	Role string `json:"role"`
-	Parts []Part `json:"parts"`
+// ---- Gemini API structs ----
+type GeminiPayload struct {
+	Contents         []GeminiMessage `json:"contents"`
+	GenerationConfig map[string]interface{} `json:"generationConfig"`
 }
 
-// Part represents a part of a message, containing the text.
-type Part struct {
+type GeminiMessage struct {
+	Role  string        `json:"role"`
+	Parts []GeminiPart  `json:"parts"`
+}
+
+type GeminiPart struct {
 	Text string `json:"text"`
 }
 
-// ResponsePayload represents the structure of the response from the Gemini API.
-type ResponsePayload struct {
-	Candidates []Candidate `json:"candidates"`
+type GeminiResponse struct {
+	Candidates []struct {
+		Content GeminiMessage `json:"content"`
+	} `json:"candidates"`
 }
 
-// Candidate represents a single candidate response from the Gemini API.
-type Candidate struct {
-	Content Message `json:"content"`
+// ---- OpenAI (ChatGPT) API structs ----
+type OpenaiPayload struct {
+	Model    string `json:"model"`
+	Messages []OpenaiMessage `json:"messages"`
 }
 
-// chatHandler handles the chat requests from the client.
+type OpenaiMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type OpenaiResponse struct {
+	Choices []struct {
+		Message OpenaiMessage `json:"message"`
+	} `json:"choices"`
+}
+
+// ---- Anthropic (Claude) API structs ----
+type AnthropicPayload struct {
+	Model    string `json:"model"`
+	Messages []AnthropicMessage `json:"messages"`
+	MaxTokens int    `json:"max_tokens"`
+}
+
+type AnthropicMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type AnthropicResponse struct {
+	Content []struct {
+		Text string `json:"text"`
+	} `json:"content"`
+}
+
+// ---- Perplexity (Llama) API structs ----
+type PerplexityPayload struct {
+	Model    string `json:"model"`
+	Messages []PerplexityMessage `json:"messages"`
+}
+
+type PerplexityMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type PerplexityResponse struct {
+	Choices []struct {
+		Message PerplexityMessage `json:"message"`
+	} `json:"choices"`
+}
+
+// chatHandler acts as a router to the correct LLM API.
 func chatHandler(w http.ResponseWriter, r *http.Request) {
-	// Set CORS headers to allow requests from the HTML file.
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
-	// Handle preflight OPTIONS request from the browser.
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -58,90 +116,289 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read the request body.
-	body, err := io.ReadAll(r.Body)
+	var clientPayload ClientRequestPayload
+	if err := json.NewDecoder(r.Body).Decode(&clientPayload); err != nil {
+		http.Error(w, "Invalid request payload", http.StatusBadRequest)
+		return
+	}
+
+	var aiText string
+	var err error
+
+	switch clientPayload.ModelName {
+	case "gemini":
+		aiText, err = callGeminiAPI(clientPayload.Contents)
+	case "llama":
+		aiText, err = callLlamaAPI(clientPayload.Contents)
+	case "claude":
+		aiText, err = callClaudeAPI(clientPayload.Contents)
+	case "chatgpt":
+		aiText, err = callChatGPTAPI(clientPayload.Contents)
+	default:
+		http.Error(w, "Invalid model name", http.StatusBadRequest)
+		return
+	}
+
 	if err != nil {
-		http.Error(w, "Error reading request body", http.StatusInternalServerError)
-		return
-	}
-	defer r.Body.Close()
-
-	// Parse the incoming JSON payload.
-	var clientPayload RequestPayload
-	if err := json.Unmarshal(body, &clientPayload); err != nil {
-		http.Error(w, "Error parsing JSON request", http.StatusBadRequest)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Ensure the API key is set.
-	if apiKey == "" {
-		http.Error(w, "API key not found. Please set the GEMINI_API_KEY environment variable.", http.StatusInternalServerError)
-		return
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"text": aiText})
+}
+
+func callGeminiAPI(contents []struct {
+	Role string `json:"role"`
+	Text string `json:"text"`
+}) (string, error) {
+	if geminiAPIKey == "" {
+		return "", fmt.Errorf("GEMINI_API_KEY environment variable not set")
 	}
 
-	// Construct the URL for the Gemini API.
-	apiUrl := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=%s", apiKey)
+	geminiContents := make([]GeminiMessage, len(contents))
+	for i, c := range contents {
+		role := "user"
+		if c.Role == "ai" {
+			role = "model"
+		}
+		geminiContents[i] = GeminiMessage{
+			Role: role,
+			Parts: []GeminiPart{{Text: c.Text}},
+		}
+	}
 
-	// Marshal the payload for the Gemini API request.
-	geminiPayload, err := json.Marshal(clientPayload)
+	payload := GeminiPayload{
+		Contents: geminiContents,
+		GenerationConfig: map[string]interface{}{
+			"temperature": 0.7,
+			"topP": 0.95,
+			"topK": 40,
+			"maxOutputTokens": 1024,
+		},
+	}
+
+	jsonPayload, _ := json.Marshal(payload)
+	apiUrl := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=%s", geminiAPIKey)
+	resp, err := makeAPIRequest(apiUrl, bytes.NewBuffer(jsonPayload))
 	if err != nil {
-		http.Error(w, "Error marshaling Gemini payload", http.StatusInternalServerError)
-		return
-	}
-
-	// Create and send the POST request to the Gemini API.
-	req, err := http.NewRequest("POST", apiUrl, bytes.NewBuffer(geminiPayload))
-	if err != nil {
-		http.Error(w, "Error creating API request", http.StatusInternalServerError)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("Error communicating with Gemini API: %v", err)
-		http.Error(w, "Error communicating with Gemini API", http.StatusInternalServerError)
-		return
+		return "", err
 	}
 	defer resp.Body.Close()
 
-	// Read the response from the Gemini API.
-	geminiBody, err := io.ReadAll(resp.Body)
+	var result GeminiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("error parsing Gemini response: %w", err)
+	}
+
+	if len(result.Candidates) > 0 && len(result.Candidates[0].Content.Parts) > 0 {
+		return result.Candidates[0].Content.Parts[0].Text, nil
+	}
+
+	return "", fmt.Errorf("unexpected Gemini response structure")
+}
+
+func callLlamaAPI(contents []struct {
+	Role string `json:"role"`
+	Text string `json:"text"`
+}) (string, error) {
+	if llamaAPIKey == "" {
+		return "", fmt.Errorf("LLAMA_API_KEY environment variable not set")
+	}
+
+	llamaMessages := make([]PerplexityMessage, len(contents))
+	for i, c := range contents {
+		role := "user"
+		if c.Role == "ai" {
+			role = "assistant"
+		}
+		llamaMessages[i] = PerplexityMessage{
+			Role:    role,
+			Content: c.Text,
+		}
+	}
+
+	payload := PerplexityPayload{
+		Model: "llama-3-sonar-small-32k-online",
+		Messages: llamaMessages,
+	}
+
+	jsonPayload, _ := json.Marshal(payload)
+	apiUrl := "https://api.perplexity.ai/chat/completions"
+	resp, err := makeAPIRequestWithAuth(apiUrl, "Bearer "+llamaAPIKey, bytes.NewBuffer(jsonPayload))
 	if err != nil {
-		http.Error(w, "Error reading Gemini API response", http.StatusInternalServerError)
-		return
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	var result PerplexityResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("error parsing Llama response: %w", err)
 	}
 
+	if len(result.Choices) > 0 {
+		return result.Choices[0].Message.Content, nil
+	}
+
+	return "", fmt.Errorf("unexpected Llama response structure")
+}
+
+func callClaudeAPI(contents []struct {
+	Role string `json:"role"`
+	Text string `json:"text"`
+}) (string, error) {
+	if claudeAPIKey == "" {
+		return "", fmt.Errorf("CLAUDE_API_KEY environment variable not set")
+	}
+
+	claudeMessages := make([]AnthropicMessage, len(contents))
+	for i, c := range contents {
+		role := "user"
+		if c.Role == "ai" {
+			role = "assistant"
+		}
+		claudeMessages[i] = AnthropicMessage{
+			Role:    role,
+			Content: c.Text,
+		}
+	}
+
+	payload := AnthropicPayload{
+		Model:    "claude-3-opus-20240229",
+		Messages: claudeMessages,
+		MaxTokens: 1024,
+	}
+
+	jsonPayload, _ := json.Marshal(payload)
+	apiUrl := "https://api.anthropic.com/v1/messages"
+	resp, err := makeAPIRequestWithAuthAndHeader(apiUrl, "x-api-key", claudeAPIKey, "anthropic-version", "2023-06-01", bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	var result AnthropicResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("error parsing Claude response: %w", err)
+	}
+
+	if len(result.Content) > 0 {
+		return result.Content[0].Text, nil
+	}
+
+	return "", fmt.Errorf("unexpected Claude response structure")
+}
+
+func callChatGPTAPI(contents []struct {
+	Role string `json:"role"`
+	Text string `json:"text"`
+}) (string, error) {
+	if chatGPTAPIKey == "" {
+		return "", fmt.Errorf("CHATGPT_API_KEY environment variable not set")
+	}
+
+	openaiMessages := make([]OpenaiMessage, len(contents))
+	for i, c := range contents {
+		role := "user"
+		if c.Role == "ai" {
+			role = "assistant"
+		}
+		openaiMessages[i] = OpenaiMessage{
+			Role:    role,
+			Content: c.Text,
+		}
+	}
+
+	payload := OpenaiPayload{
+		Model:    "gpt-4o",
+		Messages: openaiMessages,
+	}
+
+	jsonPayload, _ := json.Marshal(payload)
+	apiUrl := "https://api.openai.com/v1/chat/completions"
+	resp, err := makeAPIRequestWithAuth(apiUrl, "Bearer "+chatGPTAPIKey, bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	var result OpenaiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("error parsing ChatGPT response: %w", err)
+	}
+
+	if len(result.Choices) > 0 {
+		return result.Choices[0].Message.Content, nil
+	}
+
+	return "", fmt.Errorf("unexpected ChatGPT response structure")
+}
+
+func makeAPIRequest(url string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest("POST", url, body)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error making API request: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("Gemini API error: %s", string(geminiBody))
-		http.Error(w, fmt.Sprintf("API error: %s", string(geminiBody)), resp.StatusCode)
-		return
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, fmt.Errorf("API returned status code %d: %s", resp.StatusCode, string(respBody))
 	}
+	return resp, nil
+}
 
-	// Parse the Gemini API response.
-	var geminiResponse ResponsePayload
-	if err := json.Unmarshal(geminiBody, &geminiResponse); err != nil {
-		http.Error(w, "Error parsing Gemini API response", http.StatusInternalServerError)
-		return
+func makeAPIRequestWithAuth(url, authHeader string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest("POST", url, body)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
 	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader)
+	
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error making API request: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, fmt.Errorf("API returned status code %d: %s", resp.StatusCode, string(respBody))
+	}
+	return resp, nil
+}
 
-	// Extract the text from the response and return it to the client.
-	if len(geminiResponse.Candidates) > 0 && len(geminiResponse.Candidates[0].Content.Parts) > 0 {
-		aiText := geminiResponse.Candidates[0].Content.Parts[0].Text
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"text": aiText})
-	} else {
-		log.Println("Unexpected Gemini API response structure")
-		http.Error(w, "Unexpected API response structure", http.StatusInternalServerError)
+func makeAPIRequestWithAuthAndHeader(url, authHeaderName, authHeaderValue, otherHeaderName, otherHeaderValue string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest("POST", url, body)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
 	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(authHeaderName, authHeaderValue)
+	req.Header.Set(otherHeaderName, otherHeaderValue)
+	
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error making API request: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, fmt.Errorf("API returned status code %d: %s", resp.StatusCode, string(respBody))
+	}
+	return resp, nil
 }
 
 func main() {
-	// Register the chat handler for the /chat endpoint.
 	http.HandleFunc("/chat", chatHandler)
-
-	// Start the server on port 8080.
 	port := "8080"
 	log.Printf("Server started on http://localhost:%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))

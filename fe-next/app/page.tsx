@@ -37,6 +37,7 @@ export default function Home() {
 
     try {
       const payload = {
+        modelName: "gemini",
         contents: newChatHistory.map((msg) => ({
           role: msg.role === 'user' ? 'user' : 'model',
           parts: [{ text: msg.text }],

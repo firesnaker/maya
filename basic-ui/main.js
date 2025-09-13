@@ -50,6 +50,7 @@ async function sendMessage() {
 		showLoading(); // Show loading indicator
 		try {
 			const payload = {
+				modelName: "gemini",
 				contents: chatHistory,
 				generationConfig: {
 					temperature: 0.7, // Adjust for creativity vs. focus

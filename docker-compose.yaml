@@ -1,0 +1,35 @@
+services:
+  # --- Backend Service ---
+  backend:
+    build:
+      context: ./be-go  # Directory where the backend Dockerfile is located
+      dockerfile: Dockerfile
+    container_name: go-backend
+    ports:
+      # Map container port 8080 to host port 8080
+      - "8080:8080"
+    environment:
+      # This is how you set the API key and other variables
+      # The values here will be injected into the Go service
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    # Optional: If your Go app relies on a database, you would define it here
+    # depends_on:
+    #   - database
+
+  # --- Frontend Service ---
+  frontend:
+    build:
+      context: ./fe-next # Directory where the frontend Dockerfile is located
+      dockerfile: Dockerfile
+    container_name: next-frontend
+    ports:
+      # Map container port 3000 to host port 3000
+      - "3000:3000"
+    environment:
+      # Next.js variables need to be prefixed with NEXT_PUBLIC_ if accessed on the client side
+      - NEXT_PUBLIC_BACKEND_URL=http://backend:8080 
+      # Note: For communication between frontend and backend *inside* Docker Compose,
+      # use the service name ('backend') as the hostname, not 'localhost'.
+    depends_on:
+      - backend # Start the backend before the frontend
+

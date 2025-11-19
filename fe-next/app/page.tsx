@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 
 export default function Home() {
   const [chatHistory, setChatHistory] = useState([
@@ -8,7 +8,7 @@ export default function Home() {
   ]);
   const [userInput, setUserInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const chatHistoryRef = useRef(null);
+  const chatHistoryRef = useRef<HTMLDivElement>(null);
 
   // Function to scroll the chat history to the bottom
   const scrollToBottom = () => {
@@ -77,9 +77,20 @@ export default function Home() {
         console.error('Unexpected backend response structure:', result);
       }
     } catch (error) {
+	  //Use a type guard to check if 'error' is an Error object
+      let message = 'An unknown error occurred.';
+
+      if (error instanceof Error) {
+          // Now TypeScript knows 'error' has the '.message' property
+          message = error.message;
+      } else if (typeof error === 'string') {
+          // Handle cases where the error might be a plain string
+          message = error;
+      }
+
       const errorMessage = {
         role: 'ai',
-        text: 'An error occurred: ' + error.message,
+        text: 'An error occurred: ' + message,
       };
       setChatHistory((currentHistory) => [...currentHistory, errorMessage]);
       console.error('Error communicating with Go backend:', error);
@@ -88,7 +99,8 @@ export default function Home() {
     }
   };
 
-  const handleKeyDown = (event) => {
+  //Explicitly define the type as React.KeyboardEvent<HTMLInputElement>
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'Enter') {
       sendMessage();
     }

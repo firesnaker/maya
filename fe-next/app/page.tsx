@@ -42,12 +42,6 @@ export default function Home() {
           role: msg.role === 'user' ? 'user' : 'model',
           text: msg.text,
         })),
-        generationConfig: {
-          temperature: 0.7,
-          topP: 0.95,
-          topK: 40,
-          maxOutputTokens: 1024,
-        },
       };
 
       // Now, we call the local Go backend instead of the Gemini API directly

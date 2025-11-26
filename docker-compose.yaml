@@ -1,4 +1,22 @@
 services:
+  # --- Ollama Service ---
+  ollama:
+    # Use the official Ollama Docker image
+    image: ollama/ollama
+    container_name: ollama
+    # Ollama typically runs on port 11434
+    ports:
+      - "11434:11434"
+    # This mounts a volume to persist the models you download
+    # If you stop/remove the container, your models will still be there
+    volumes:
+      - ollama_models:/root/.ollama
+    # Run a simple model immediately after the container starts
+    #command: ["/bin/sh", "-c", "ollama serve & ollama pull llama3:8b"]
+    command: ["/bin/sh", "-c", "ollama serve & ollama pull gemma2:2b-instruct"]
+    # Adjust this model name (llama3:8b) based on your hardware constraints. 
+    # Smaller models like phi3:mini are better for resource-limited machines.
+
   # --- Backend Service ---
   backend:
     build:
@@ -12,8 +30,13 @@ services:
       # This is how you set the API key and other variables
       # The values here will be injected into the Go service
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      # 💡 New: Set the LLM API URL for the Go backend
+      - LLM_API_URL=http://ollama:11434
+    depends_on:
+      # 💡 New: Ensure Ollama is running before the backend tries to connect
+      ollama:
+        condition: service_started
     # Optional: If your Go app relies on a database, you would define it here
-    # depends_on:
     #   - database
 
   # --- Frontend Service ---
@@ -32,4 +55,9 @@ services:
       # use the service name ('backend') as the hostname, not 'localhost'.
     depends_on:
       - backend # Start the backend before the frontend
-
+      - ollama # Ensures LLM is running before FE starts (optional, but clean)
+      
+# --- Define the Volume ---
+volumes:
+  ollama_models:
+    driver: local

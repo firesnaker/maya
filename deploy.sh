@@ -26,6 +26,7 @@ docker compose up --build -d
 
 echo ""
 echo "Deployment Complete! 🎉"
+echo "Ollama is running on: http://ollama:11434"
 echo "Backend is running on: http://localhost:8080"
 echo "Frontend is running on: http://localhost:3000"
 echo "To stop and remove containers, run: docker compose down"

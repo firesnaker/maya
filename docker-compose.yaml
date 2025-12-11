@@ -11,10 +11,23 @@ services:
     environment:
       # This is how you set the API key and other variables
       # The values here will be injected into the Go service
+      # --- NEW: Redis Connection Settings ---
+      - REDIS_ADDR=redis:6379 
+      # - REDIS_PASSWORD= # Optional, uncomment if you decide to secure Redis
+      # -------------------------------------
       - GEMINI_API_KEY=${GEMINI_API_KEY}
-    # Optional: If your Go app relies on a database, you would define it here
-    # depends_on:
+     # Optional: If your Go app relies on a database, you would define it here
+    depends_on:
+    - redis # Ensures Redis starts before the Go backend
     #   - database
+
+  # New Redis service for short-term memory
+  redis:
+    image: redis:7.0-alpine # Using the lightweight Alpine variant
+    restart: always
+    ports:
+      - "6379:6379" # Expose for local debugging/tools (optional but recommended)
+    command: redis-server --appendonly yes # Enables AOF persistence (good practice)
 
   # --- Frontend Service ---
   frontend:
@@ -32,4 +45,3 @@ services:
       # use the service name ('backend') as the hostname, not 'localhost'.
     depends_on:
       - backend # Start the backend before the frontend
-

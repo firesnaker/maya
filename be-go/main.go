@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,7 +10,13 @@ import (
 	"net/http"
 	"os"
 	"time"
+	
+	//Import the Redis client library
+	redis "github.com/redis/go-redis/v9"
 )
+
+var redisClient *redis.Client
+var ctx = context.Background()
 
 // Define API keys for different models from environment variables.
 var geminiAPIKey = os.Getenv("GEMINI_API_KEY")
@@ -98,6 +105,34 @@ type PerplexityResponse struct {
 	Choices []struct {
 		Message PerplexityMessage `json:"message"`
 	} `json:"choices"`
+}
+
+// InitRedis connects to Redis and checks the connection.
+func InitRedis() {
+    redisAddr := os.Getenv("REDIS_ADDR")
+    if redisAddr == "" {
+        // We will default to skipping Redis if the variable isn't set
+        // This makes the service flexible in different environments.
+        fmt.Println("REDIS_ADDR not set. Running in stateless mode.")
+        return
+    }
+
+    // 1. Create a new client instance
+    redisClient = redis.NewClient(&redis.Options{
+        Addr:     redisAddr,
+        Password: "", // No password set in our docker-compose for now
+        DB:       0,  // Use default DB
+    })
+
+    // 2. Test the connection with PING
+    pingResult, err := redisClient.Ping(ctx).Result()
+    if err != nil {
+        fmt.Printf("❌ Failed to connect to Redis at %s: %v\n", redisAddr, err)
+        // Crash the application if connection is essential (Best Practice for production)
+        os.Exit(1) 
+    }
+
+    fmt.Printf("✅ Successfully connected to Redis: %s\n", pingResult)
 }
 
 // chatHandler acts as a router to the correct LLM API.
@@ -398,6 +433,8 @@ func makeAPIRequestWithAuthAndHeader(url, authHeaderName, authHeaderValue, other
 }
 
 func main() {
+	InitRedis() // <-- Call the initialization function here. You need to call this function early in your main()
+	
 	http.HandleFunc("/chat", chatHandler)
 	port := "8080"
 	log.Printf("Server started on http://localhost:%s", port)

@@ -24,20 +24,22 @@ var llamaAPIKey = os.Getenv("LLAMA_API_KEY")
 var claudeAPIKey = os.Getenv("CLAUDE_API_KEY")
 var chatGPTAPIKey = os.Getenv("CHATGPT_API_KEY")
 
-// Message represents a single turn in the conversation, used for storage and retrieval.
-type Message struct {
-	Role string `json:"role"` // "user", "ai", or "system"
-	Text string `json:"text"`
-}
-
 // ClientRequestPayload represents the structure of the incoming request from the client,
 // now including a field to specify the model.
 type ClientRequestPayload struct {
+	SessionID string `json:"sessionId"` // <-- NEW!
 	ModelName string `json:"modelName"`
 	Contents []struct {
 		Role string `json:"role"`
 		Text string `json:"text"`
-	} `json:"contents"`
+	} `json:"contents"` // This contents array now only holds the NEW user message
+}
+
+// Message represents a single turn in the conversation, used for storage and retrieval.
+// We will also use the Message struct defined earlier (Step 2.3) for Redis storage
+type Message struct {
+	Role string `json:"role"` // "user", "ai", or "system"
+	Text string `json:"text"`
 }
 
 // ---- Gemini API structs ----
@@ -113,6 +115,9 @@ type PerplexityResponse struct {
 	} `json:"choices"`
 }
 
+// CHAT_HISTORY_TTL is the Time-To-Live (expiry) for the Redis key (e.g., 24 hours)
+const CHAT_HISTORY_TTL = 24 * time.Hour 
+
 // InitRedis connects to Redis and checks the connection.
 func InitRedis() {
     redisAddr := os.Getenv("REDIS_ADDR")
@@ -141,6 +146,49 @@ func InitRedis() {
     fmt.Printf("✅ Successfully connected to Redis: %s\n", pingResult)
 }
 
+// getHistoryFromRedis fetches the chat history for a given session ID.
+func getHistoryFromRedis(sessionId string) ([]Message, error) {
+	if redisClient == nil {
+		// Fallback for stateless mode (should not happen if InitRedis succeeded)
+		return nil, fmt.Errorf("Redis client is not initialized")
+	}
+
+	historyJSON, err := redisClient.Get(ctx, sessionId).Result()
+	if err == redis.Nil {
+		// Key not found (new session), return empty history
+		return []Message{}, nil 
+	}
+	if err != nil {
+		// Redis connection error
+		return nil, fmt.Errorf("redis error retrieving history: %w", err)
+	}
+
+	var history []Message
+	if err := json.Unmarshal([]byte(historyJSON), &history); err != nil {
+		return nil, fmt.Errorf("error unmarshaling history JSON: %w", err)
+	}
+	return history, nil
+}
+
+// saveHistoryToRedis saves the updated chat history for a given session ID, setting a TTL.
+func saveHistoryToRedis(sessionId string, history []Message) error {
+	if redisClient == nil {
+		return fmt.Errorf("Redis client is not initialized")
+	}
+
+	historyJSON, err := json.Marshal(history)
+	if err != nil {
+		return fmt.Errorf("error marshaling history: %w", err)
+	}
+
+	// Save the JSON string to Redis with a 24-hour TTL
+	err = redisClient.Set(ctx, sessionId, historyJSON, CHAT_HISTORY_TTL).Err()
+	if err != nil {
+		return fmt.Errorf("redis error saving history: %w", err)
+	}
+	return nil
+}
+
 // chatHandler acts as a router to the correct LLM API.
 func chatHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -162,19 +210,56 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request payload", http.StatusBadRequest)
 		return
 	}
-
+	
+	// Check for required fields
+    if clientPayload.SessionID == "" || len(clientPayload.Contents) == 0 {
+        http.Error(w, "Missing sessionId or message content", http.StatusBadRequest)
+        return
+    }
+    
+    // 2. Retrieve History from Redis
+	history, err := getHistoryFromRedis(clientPayload.SessionID)
+	if err != nil {
+		log.Printf("Error in getHistoryFromRedis: %v", err)
+		http.Error(w, "Internal server error retrieving history", http.StatusInternalServerError)
+		return
+	}
+	
+	// 3. System Prompt (Handle new session context)
+    // If the history is empty, prepend the system prompt.
+    if len(history) == 0 {
+        // NOTE: We will hardcode the system prompt for now, 
+        // but this will be moved to a config variable later.
+        systemPrompt := Message{
+            Role: "system",
+            Text: "You are a helpful and friendly AI assistant. Keep your answers concise.",
+        }
+        history = append(history, systemPrompt)
+    }
+    
+    // 4. Append the NEW User Message to the full history
+	// The clientPayload.Contents[0] is the new message sent from the FE.
+    newMessage := clientPayload.Contents[0]
+	history = append(history, Message{
+        Role: newMessage.Role,
+        Text: newMessage.Text,
+    })
+    
+    // 5. Prepare Full Context for LLM Call
+	// We pass the full, assembled 'history' array to the LLM functions.
+	// NOTE: The LLM API functions must be updated in Step 4 below to accept the []Message type.
 	var aiText string
-	var err error
+	//var err error
 
 	switch clientPayload.ModelName {
 	case "gemini":
-		aiText, err = callGeminiAPI(clientPayload.Contents)
+		aiText, err = callGeminiAPI(history)
 	case "llama":
-		aiText, err = callLlamaAPI(clientPayload.Contents)
+		aiText, err = callLlamaAPI(history)
 	case "claude":
-		aiText, err = callClaudeAPI(clientPayload.Contents)
+		aiText, err = callClaudeAPI(history)
 	case "chatgpt":
-		aiText, err = callChatGPTAPI(clientPayload.Contents)
+		aiText, err = callChatGPTAPI(history)
 	default:
 		http.Error(w, "Invalid model name", http.StatusBadRequest)
 		return
@@ -184,28 +269,70 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	
+	// 6. Append the AI Response to the history
+    aiMessage := Message{
+        Role: "ai",
+        Text: aiText,
+    }
+    history = append(history, aiMessage)
+
+	// 7. Save the Full Updated History back to Redis
+	if err := saveHistoryToRedis(clientPayload.SessionID, history); err != nil {
+		log.Printf("Error in saveHistoryToRedis: %v", err)
+        // Log the error but don't necessarily fail the response, as the user got the answer.
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"text": aiText})
 }
 
-func callGeminiAPI(contents []struct {
-	Role string `json:"role"`
-	Text string `json:"text"`
-}) (string, error) {
+//func callGeminiAPI(contents []struct {
+//	Role string `json:"role"`
+//	Text string `json:"text"`
+//}) (string, error) {
+func callGeminiAPI(contents []Message) (string, error) { // NEW
 	if geminiAPIKey == "" {
 		return "", fmt.Errorf("GEMINI_API_KEY environment variable not set")
 	}
 
-	geminiContents := make([]GeminiMessage, len(contents))
-	for i, c := range contents {
-		role := "user"
-		if c.Role == "ai" {
+	geminiContents := make([]GeminiMessage, 0, len(contents))
+	//for i, c := range contents {
+	for _, c := range contents {
+		role := "" // Initialize role to an empty string
+		
+		// 1. Handle Role Mapping for Gemini API
+		switch c.Role {
+		case "user":
+			role = "user"
+		case "ai":
 			role = "model"
+        case "system":
+            // 2. IMPORTANT FIX: Map the system role to "user" for now, 
+            // so the LLM processes it as a context-setting instruction.
+            // This is temporary until you adopt the proper systemInstruction field.
+            role = "user" 
+		default:
+            // Skip any unknown roles
+            // If the role is unexpected (e.g., a typo), we skip it entirely
+            log.Printf("Warning: Skipping message with invalid role: %s", c.Role)
+            continue
 		}
-		geminiContents[i] = GeminiMessage{
-			Role: role,
-			Parts: []GeminiPart{{Text: c.Text}},
+	//	role := "user"
+	//	if c.Role == "ai" {
+	//		role = "model"
+	//	}
+
+	//	geminiContents[i] = GeminiMessage{
+	//		Role: role,
+	//		Parts: []GeminiPart{{Text: c.Text}},
+	//	}
+		// 3. Create the GeminiMessage using the Message struct fields (c.Text)
+		if role != "" {
+			geminiContents = append(geminiContents, GeminiMessage{
+				Role: role,
+				Parts: []GeminiPart{{Text: c.Text}}, // c.Text comes from the Message struct
+			})
 		}
 	}
 
@@ -239,24 +366,51 @@ func callGeminiAPI(contents []struct {
 	return "", fmt.Errorf("unexpected Gemini response structure")
 }
 
-func callLlamaAPI(contents []struct {
-	Role string `json:"role"`
-	Text string `json:"text"`
-}) (string, error) {
+//func callLlamaAPI(contents []struct {
+//	Role string `json:"role"`
+//	Text string `json:"text"`
+//}) (string, error) {
+func callLlamaAPI(contents []Message) (string, error) { // NEW
 	if llamaAPIKey == "" {
 		return "", fmt.Errorf("LLAMA_API_KEY environment variable not set")
 	}
 
 	llamaMessages := make([]PerplexityMessage, len(contents))
-	for i, c := range contents {
-		role := "user"
-		if c.Role == "ai" {
+	
+	//for i, c := range contents {
+	//	role := "user"
+	//	if c.Role == "ai" {
+	//		role = "assistant"
+	//	}
+	//	llamaMessages[i] = PerplexityMessage{
+	//		Role:    role,
+	//		Content: c.Text,
+	//	}
+	//}
+	//for i, c := range contents {
+	for _, c := range contents {
+		role := "" // Initialize role to an empty string
+		
+		// 1. Handle Role Mapping for Gemini API
+		switch c.Role {
+		case "user":
+			role = "user"
+		case "ai":
 			role = "assistant"
+        case "system":
+            // 2. IMPORTANT FIX: Map the system role to "user" for now, 
+            // so the LLM processes it as a context-setting instruction.
+            // This is temporary until you adopt the proper systemInstruction field.
+            role = "user" 
+		default:
+            // Skip any unknown roles
+            continue
 		}
-		llamaMessages[i] = PerplexityMessage{
-			Role:    role,
-			Content: c.Text,
-		}
+		// 3. Create the GeminiMessage using the Message struct fields (c.Text)
+		llamaMessages = append(llamaMessages, PerplexityMessage{
+			Role: role,
+			Content: c.Text, // c.Text comes from the Message struct
+		})
 	}
 
 	payload := PerplexityPayload{
@@ -284,24 +438,50 @@ func callLlamaAPI(contents []struct {
 	return "", fmt.Errorf("unexpected Llama response structure")
 }
 
-func callClaudeAPI(contents []struct {
-	Role string `json:"role"`
-	Text string `json:"text"`
-}) (string, error) {
+//func callClaudeAPI(contents []struct {
+//	Role string `json:"role"`
+//	Text string `json:"text"`
+//}) (string, error) {
+func callClaudeAPI(contents []Message) (string, error) { // NEW
 	if claudeAPIKey == "" {
 		return "", fmt.Errorf("CLAUDE_API_KEY environment variable not set")
 	}
 
 	claudeMessages := make([]AnthropicMessage, len(contents))
-	for i, c := range contents {
-		role := "user"
-		if c.Role == "ai" {
-			role = "assistant"
+	
+	//for i, c := range contents {
+	//	role := "user"
+	//	if c.Role == "ai" {
+	//		role = "assistant"
+	//	}
+	//	claudeMessages[i] = AnthropicMessage{
+	//		Role:    role,
+	//		Content: c.Text,
+	//	}
+	//}
+	for _, c := range contents {
+		role := "" // Initialize role to an empty string
+		
+		// 1. Handle Role Mapping for Gemini API
+		switch c.Role {
+		case "user":
+			role = "user"
+		case "ai":
+			role = "asssitant"
+        case "system":
+            // 2. IMPORTANT FIX: Map the system role to "user" for now, 
+            // so the LLM processes it as a context-setting instruction.
+            // This is temporary until you adopt the proper systemInstruction field.
+            role = "user" 
+		default:
+            // Skip any unknown roles
+            continue
 		}
-		claudeMessages[i] = AnthropicMessage{
-			Role:    role,
-			Content: c.Text,
-		}
+		// 3. Create the GeminiMessage using the Message struct fields (c.Text)
+		claudeMessages = append(claudeMessages, AnthropicMessage{
+			Role: role,
+			Content: c.Text, // c.Text comes from the Message struct
+		})
 	}
 
 	payload := AnthropicPayload{
@@ -330,24 +510,50 @@ func callClaudeAPI(contents []struct {
 	return "", fmt.Errorf("unexpected Claude response structure")
 }
 
-func callChatGPTAPI(contents []struct {
-	Role string `json:"role"`
-	Text string `json:"text"`
-}) (string, error) {
+//func callChatGPTAPI(contents []struct {
+//	Role string `json:"role"`
+//	Text string `json:"text"`
+//}) (string, error) {
+func callChatGPTAPI(contents []Message) (string, error) { // NEW
 	if chatGPTAPIKey == "" {
 		return "", fmt.Errorf("CHATGPT_API_KEY environment variable not set")
 	}
 
 	openaiMessages := make([]OpenaiMessage, len(contents))
-	for i, c := range contents {
-		role := "user"
-		if c.Role == "ai" {
+	
+	//for i, c := range contents {
+	//	role := "user"
+	//	if c.Role == "ai" {
+	//		role = "assistant"
+	//	}
+	//	openaiMessages[i] = OpenaiMessage{
+	//		Role:    role,
+	//		Content: c.Text,
+	//	}
+	//}
+	for _, c := range contents {
+		role := "" // Initialize role to an empty string
+		
+		// 1. Handle Role Mapping for Gemini API
+		switch c.Role {
+		case "user":
+			role = "user"
+		case "ai":
 			role = "assistant"
+        case "system":
+            // 2. IMPORTANT FIX: Map the system role to "user" for now, 
+            // so the LLM processes it as a context-setting instruction.
+            // This is temporary until you adopt the proper systemInstruction field.
+            role = "user" 
+		default:
+            // Skip any unknown roles
+            continue
 		}
-		openaiMessages[i] = OpenaiMessage{
-			Role:    role,
-			Content: c.Text,
-		}
+		// 3. Create the GeminiMessage using the Message struct fields (c.Text)
+		openaiMessages = append(openaiMessages, OpenaiMessage{
+			Role: role,
+			Content: c.Text, // c.Text comes from the Message struct
+		})
 	}
 
 	payload := OpenaiPayload{

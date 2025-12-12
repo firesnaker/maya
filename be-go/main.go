@@ -24,6 +24,12 @@ var llamaAPIKey = os.Getenv("LLAMA_API_KEY")
 var claudeAPIKey = os.Getenv("CLAUDE_API_KEY")
 var chatGPTAPIKey = os.Getenv("CHATGPT_API_KEY")
 
+// Message represents a single turn in the conversation, used for storage and retrieval.
+type Message struct {
+	Role string `json:"role"` // "user", "ai", or "system"
+	Text string `json:"text"`
+}
+
 // ClientRequestPayload represents the structure of the incoming request from the client,
 // now including a field to specify the model.
 type ClientRequestPayload struct {
@@ -432,10 +438,58 @@ func makeAPIRequestWithAuthAndHeader(url, authHeaderName, authHeaderValue, other
 	return resp, nil
 }
 
+// getChatHistoryHandler retrieves the full conversation history for a given session ID.
+func getChatHistoryHandler(w http.ResponseWriter, r *http.Request) {
+    w.Header().Set("Access-Control-Allow-Origin", "*")
+    w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+    w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+    if r.Method == "OPTIONS" {
+        w.WriteHeader(http.StatusOK)
+        return
+    }
+
+    if r.Method != "GET" {
+        http.Error(w, "Only GET requests are allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+    // 1. Get Session ID from query parameters
+    sessionId := r.URL.Query().Get("sessionId")
+    if sessionId == "" {
+        http.Error(w, "Missing sessionId query parameter", http.StatusBadRequest)
+        return
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    
+    // 2. Retrieve history JSON string from Redis
+    historyJSON, err := redisClient.Get(ctx, sessionId).Result()
+    
+    if err == redis.Nil {
+        // 3a. Key not found (new session), return an empty array []
+        json.NewEncoder(w).Encode([]Message{}) 
+        return
+    } else if err != nil {
+        log.Printf("Redis error retrieving history for %s: %v", sessionId, err)
+        http.Error(w, "Internal server error retrieving history", http.StatusInternalServerError)
+        return
+    }
+
+    // 3b. Key found, return the history JSON directly
+    // Note: We don't unmarshal/re-marshal here for efficiency; we just pipe the JSON string
+    w.Write([]byte(historyJSON))
+}
+
 func main() {
 	InitRedis() // <-- Call the initialization function here. You need to call this function early in your main()
 	
+	// POST handler for sending new messages
 	http.HandleFunc("/chat", chatHandler)
+	
+	// GET handler for retrieving history on refresh ---
+    http.HandleFunc("/chat/history", getChatHistoryHandler)
+    
 	port := "8080"
 	log.Printf("Server started on http://localhost:%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))

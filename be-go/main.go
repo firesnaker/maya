@@ -42,6 +42,17 @@ type Message struct {
 	Text string `json:"text"`
 }
 
+type Profile struct {
+    // 1. Fixed Core Fields (Necessary for application logic)
+    SessionID string `json:"sessionId"` // Mandatory for Redis key linking
+    Name      string `json:"name"`      // The user's name (high-value)
+    
+    // 2. Dynamic Preferences (Flexible Key-Value Store)
+    // This map can hold things like "favorite_color", "cuisine_preference", 
+    // "learning_goal", or any facts the AI learns.
+    Preferences map[string]string `json:"preferences"` 
+}
+
 // ---- Gemini API structs ----
 type GeminiPayload struct {
 	Contents         []GeminiMessage `json:"contents"`
@@ -189,6 +200,64 @@ func saveHistoryToRedis(sessionId string, history []Message) error {
 	return nil
 }
 
+// getProfileFromRedis fetches the user profile for a given session ID.
+func getProfileFromRedis(sessionId string) (Profile, error) {
+    if redisClient == nil {
+        return Profile{}, fmt.Errorf("Redis client is not initialized")
+    }
+
+    // Use a unique key for the profile
+    profileKey := "profile:" + sessionId 
+
+    profileJSON, err := redisClient.Get(ctx, profileKey).Result()
+    if err == redis.Nil {
+        // Profile not found (new user), return an empty profile struct
+        return Profile{
+            SessionID: sessionId,
+            Preferences: make(map[string]string), // Initialize the map to avoid nil errors
+        }, nil 
+    }
+    if err != nil {
+        // Redis connection error
+        return Profile{}, fmt.Errorf("redis error retrieving profile: %w", err)
+    }
+
+    var profile Profile
+    if err := json.Unmarshal([]byte(profileJSON), &profile); err != nil {
+        return Profile{}, fmt.Errorf("error unmarshaling profile JSON: %w", err)
+    }
+    
+    // Ensure the Preferences map is initialized even if the JSON didn't include it
+    if profile.Preferences == nil {
+        profile.Preferences = make(map[string]string)
+    }
+
+    return profile, nil
+}
+
+// PROFILE_TTL defines how long the long-term memory lasts (e.g., 30 days)
+const PROFILE_TTL = 30 * 24 * time.Hour
+
+func saveProfileToRedis(sessionId string, profile Profile) error {
+	if redisClient == nil {
+		return fmt.Errorf("Redis client is not initialized")
+	}
+
+	profileKey := "profile:" + sessionId
+
+	profileJSON, err := json.Marshal(profile)
+	if err != nil {
+		return fmt.Errorf("error marshaling profile: %w", err)
+	}
+
+	// Save to Redis with a 30-day expiration
+	err = redisClient.Set(ctx, profileKey, profileJSON, PROFILE_TTL).Err()
+	if err != nil {
+		return fmt.Errorf("redis error saving profile: %w", err)
+	}
+	return nil
+}
+
 // chatHandler acts as a router to the correct LLM API.
 func chatHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -217,7 +286,7 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
     
-    // 2. Retrieve History from Redis
+    // 1. Retrieve History (Short-Term Memory)
 	history, err := getHistoryFromRedis(clientPayload.SessionID)
 	if err != nil {
 		log.Printf("Error in getHistoryFromRedis: %v", err)
@@ -225,16 +294,47 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
+	// 2. Retrieve Profile (Long-Term Memory) - NEW!
+	profile, err := getProfileFromRedis(clientPayload.SessionID)
+	if err != nil {
+		log.Printf("Error retrieving profile: %v", err)
+		// We continue even if profile fails; we'll just use a generic prompt.
+	}
+
+	// 3. Build the Personalized System Prompt
+	systemPromptText := "You are a helpful and friendly AI assistant. Keep your answers concise."
+	if profile.Name != "" {
+		systemPromptText = fmt.Sprintf("You are an assistant for %s. Address them by name occasionally. ", profile.Name)
+	}
+	
+	// Add preferences to the instructions
+	if len(profile.Preferences) > 0 {
+		systemPromptText += "Here is what you know about the user: "
+		for key, value := range profile.Preferences {
+			systemPromptText += fmt.Sprintf("- %s: %s. ", key, value)
+		}
+	}
+	systemPromptText += "Keep your responses concise and tailored to these preferences."
+	
+	// 4. Construct the Full Context for the LLM API
+	// We create a temporary slice for the API call that starts with our Dynamic System Prompt
+	fullContext := []Message{
+		{Role: "system", Text: systemPromptText},
+	}
+	
+	// Append the existing history and the brand-new user message
+	history = append(fullContext, history...)
+	
 	// 3. System Prompt (Handle new session context)
     // If the history is empty, prepend the system prompt.
     if len(history) == 0 {
         // NOTE: We will hardcode the system prompt for now, 
         // but this will be moved to a config variable later.
-        systemPrompt := Message{
+        systemPromptText := Message{
             Role: "system",
             Text: "You are a helpful and friendly AI assistant. Keep your answers concise.",
         }
-        history = append(history, systemPrompt)
+        history = append(history, systemPromptText)
     }
     
     // 4. Append the NEW User Message to the full history
@@ -277,8 +377,11 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
     }
     history = append(history, aiMessage)
 
+	// 6. Persistence: Save only the conversation turns (User + AI) to Redis
+	// We do NOT save the system prompt here, as we regenerate it every time.
+	updatedHistory := append(history, newMessage, Message{Role: "ai", Text: aiText})
 	// 7. Save the Full Updated History back to Redis
-	if err := saveHistoryToRedis(clientPayload.SessionID, history); err != nil {
+	if err := saveHistoryToRedis(clientPayload.SessionID, updatedHistory); err != nil {
 		log.Printf("Error in saveHistoryToRedis: %v", err)
         // Log the error but don't necessarily fail the response, as the user got the answer.
 	}
@@ -687,6 +790,43 @@ func getChatHistoryHandler(w http.ResponseWriter, r *http.Request) {
     w.Write([]byte(historyJSON))
 }
 
+func profileHandler(w http.ResponseWriter, r *http.Request) {
+	// Enable CORS (Standard for your existing handlers)
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	if r.Method != "POST" {
+		http.Error(w, "Only POST requests are allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var profile Profile
+	if err := json.NewDecoder(r.Body).Decode(&profile); err != nil {
+		http.Error(w, "Invalid profile payload", http.StatusBadRequest)
+		return
+	}
+
+	if profile.SessionID == "" {
+		http.Error(w, "Missing sessionId in profile", http.StatusBadRequest)
+		return
+	}
+
+	// Save the updated profile to Redis
+	if err := saveProfileToRedis(profile.SessionID, profile); err != nil {
+		log.Printf("Error saving profile: %v", err)
+		http.Error(w, "Failed to save profile", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "profile updated"})
+}
+
 func main() {
 	InitRedis() // <-- Call the initialization function here. You need to call this function early in your main()
 	
@@ -695,6 +835,9 @@ func main() {
 	
 	// GET handler for retrieving history on refresh ---
     http.HandleFunc("/chat/history", getChatHistoryHandler)
+
+    // handler for setting and retrieving profile ---
+    http.HandleFunc("/profile", profileHandler)
     
 	port := "8080"
 	log.Printf("Server started on http://localhost:%s", port)

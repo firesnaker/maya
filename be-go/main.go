@@ -18,6 +18,9 @@ import (
 var redisClient *redis.Client
 var ctx = context.Background()
 
+// Near your other global variables (redisClient, etc.)
+var embedder Embedder
+
 // Define API keys for different models from environment variables.
 var geminiAPIKey = os.Getenv("GEMINI_API_KEY")
 var llamaAPIKey = os.Getenv("LLAMA_API_KEY")
@@ -42,6 +45,7 @@ type Message struct {
 	Text string `json:"text"`
 }
 
+// The Profile is the reference for the AI on user preferences.
 type Profile struct {
     // 1. Fixed Core Fields (Necessary for application logic)
     SessionID string `json:"sessionId"` // Mandatory for Redis key linking
@@ -51,6 +55,11 @@ type Profile struct {
     // This map can hold things like "favorite_color", "cuisine_preference", 
     // "learning_goal", or any facts the AI learns.
     Preferences map[string]string `json:"preferences"` 
+}
+
+// Embedder is the contract for turning text into vectors.
+type Embedder interface {
+	GenerateEmbedding(ctx context.Context, text string) ([]float32, error)
 }
 
 // ---- Gemini API structs ----
@@ -827,8 +836,83 @@ func profileHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "profile updated"})
 }
 
+type GeminiEmbedder struct {
+	APIKey string
+}
+
+// These structs match the Google AI API schema
+type geminiEmbedRequest struct {
+	Content struct {
+		Parts []struct {
+			Text string `json:"text"`
+		} `json:"parts"`
+	} `json:"content"`
+	// Use Matryoshka learning to truncate to 768 dimensions
+	OutputDimensionality int `json:"outputDimensionality"`
+}
+
+type geminiEmbedResponse struct {
+	Embedding struct {
+		Values []float32 `json:"values"`
+	} `json:"embedding"`
+}
+
+func (g *GeminiEmbedder) GenerateEmbedding(ctx context.Context, text string) ([]float32, error) {
+	// Stable v1 endpoint for gemini-embedding-001
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key=%s", g.APIKey)
+
+	// Prepare the payload
+	reqBody := geminiEmbedRequest{
+		OutputDimensionality: 768, // Forces the 3072-dim model to return a optimized 768-dim vector
+	}
+	reqBody.Content.Parts = []struct {
+		Text string `json:"text"`
+	}{{Text: text}}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	// Create the request
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Send it
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("gemini embedding error: status %d, body: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var result geminiEmbedResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	return result.Embedding.Values, nil
+}
+
 func main() {
 	InitRedis() // <-- Call the initialization function here. You need to call this function early in your main()
+	
+	// Vector DB start
+	apiKey := geminiAPIKey
+    if apiKey == "" {
+        log.Fatal("GEMINI_API_KEY must be set")
+    }
+
+    // Initialize our specific implementation for vector db embedder
+    embedder = &GeminiEmbedder{APIKey: apiKey}
 	
 	// POST handler for sending new messages
 	http.HandleFunc("/chat", chatHandler)

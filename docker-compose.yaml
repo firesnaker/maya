@@ -6,28 +6,41 @@ services:
       dockerfile: Dockerfile
     container_name: go-backend
     ports:
-      # Map container port 8080 to host port 8080
-      - "8080:8080"
+      - "8080:8080"  # Map container port 8080 to host port 8080
     environment:
       # This is how you set the API key and other variables
       # The values here will be injected into the Go service
-      # --- NEW: Redis Connection Settings ---
+      # --- Redis Connection Settings ---
       - REDIS_ADDR=redis:6379 
       # - REDIS_PASSWORD= # Optional, uncomment if you decide to secure Redis
       # -------------------------------------
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      # --- Qdrant Vector DB ---
+      - QDRANT_ADDR=qdrant:6334
      # Optional: If your Go app relies on a database, you would define it here
     depends_on:
     - redis # Ensures Redis starts before the Go backend
+    - qdrant # Ensure Vector DB is up before backend starts
     #   - database
 
-  # New Redis service for short-term memory
+  # New Redis service for short/long term JSON memory
   redis:
     image: redis:7.0-alpine # Using the lightweight Alpine variant
     restart: always
     ports:
       - "6379:6379" # Expose for local debugging/tools (optional but recommended)
     command: redis-server --appendonly yes # Enables AOF persistence (good practice)
+    volumes:
+      - redis_data:/data # MOUNT THE VOLUME HERE
+
+  # Vector DB service
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333" # REST API
+      - "6334:6334" # gRPC (Recommended for Go)
+    volumes:
+      - qdrant_storage:/qdrant/storage
 
   # --- Frontend Service ---
   frontend:
@@ -36,12 +49,16 @@ services:
       dockerfile: Dockerfile
     container_name: next-frontend
     ports:
-      # Map container port 3000 to host port 3000
-      - "3000:3000"
+      - "3000:3000" # Map container port 3000 to host port 3000
     environment:
       # Next.js variables need to be prefixed with NEXT_PUBLIC_ if accessed on the client side
       - NEXT_PUBLIC_BACKEND_URL=http://backend:8080 
       # Note: For communication between frontend and backend *inside* Docker Compose,
       # use the service name ('backend') as the hostname, not 'localhost'.
+      #- NEXT_PUBLIC_BACKEND_URL=http://localhost:8080 # Change to localhost:8080 if calls are made from the browser
     depends_on:
       - backend # Start the backend before the frontend
+
+volumes:
+  redis_data:
+  qdrant_storage:

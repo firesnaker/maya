@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 	
 	//Import the Redis client library
@@ -136,6 +137,12 @@ type PerplexityResponse struct {
 	Choices []struct {
 		Message PerplexityMessage `json:"message"`
 	} `json:"choices"`
+}
+
+// ChunkOptions defines the parameters for our memory fragmentation
+type ChunkOptions struct {
+	Size    int // Target characters per chunk (e.g., 500-1000)
+	Overlap int // Number of characters to carry over (e.g., 10-15%)
 }
 
 // CHAT_HISTORY_TTL is the Time-To-Live (expiry) for the Redis key (e.g., 24 hours)
@@ -1001,6 +1008,58 @@ func SearchMemory(ctx context.Context, qClient *qdrant.Client, embedder *GeminiE
 	}
 
 	return memories, nil
+}
+
+func RecursiveSplit(text string, opts ChunkOptions) []string {
+	// 1. If text is already small enough, we're done
+	if len(text) <= opts.Size {
+		return []string{text}
+	}
+
+	// 2. Define our "Polite" separators from most significant to least
+	separators := []string{"\n\n", "\n", " ", ""}
+	var chosenSeparator string
+	
+	for _, sep := range separators {
+		if strings.Contains(text, sep) {
+			chosenSeparator = sep
+			break
+		}
+	}
+
+	// 3. Split the text
+	parts := strings.Split(text, chosenSeparator)
+	var chunks []string
+	var currentChunk strings.Builder
+
+	for _, part := range parts {
+		// If adding this part exceeds the limit, save the current chunk
+		if currentChunk.Len()+len(part)+len(chosenSeparator) > opts.Size {
+			if currentChunk.Len() > 0 {
+				chunks = append(chunks, currentChunk.String())
+				
+				// Handle Overlap: Start the next chunk with the tail of the previous one
+				overlapStart := currentChunk.Len() - opts.Overlap
+				if overlapStart < 0 { overlapStart = 0 }
+				overlapText := currentChunk.String()[overlapStart:]
+				
+				currentChunk.Reset()
+				currentChunk.WriteString(overlapText)
+			}
+		}
+		
+		if currentChunk.Len() > 0 && chosenSeparator != "" {
+			currentChunk.WriteString(chosenSeparator)
+		}
+		currentChunk.WriteString(part)
+	}
+
+	// Add the final remaining piece
+	if currentChunk.Len() > 0 {
+		chunks = append(chunks, currentChunk.String())
+	}
+
+	return chunks
 }
 
 func main() {

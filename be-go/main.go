@@ -13,6 +13,9 @@ import (
 	
 	//Import the Redis client library
 	redis "github.com/redis/go-redis/v9"
+	
+	//Import the Qdrant client library
+	"github.com/qdrant/go-client/qdrant"
 )
 
 var redisClient *redis.Client
@@ -902,6 +905,104 @@ func (g *GeminiEmbedder) GenerateEmbedding(ctx context.Context, text string) ([]
 	return result.Embedding.Values, nil
 }
 
+func SetupCollection(ctx context.Context, client *qdrant.Client, collectionName string) error {
+	return client.CreateCollection(ctx, &qdrant.CreateCollection{
+		CollectionName: collectionName,
+		VectorsConfig: qdrant.NewVectorsConfig(&qdrant.VectorParams{
+			Size:     768, // Matches our Gemini outputDimensionality
+			Distance: qdrant.Distance_Cosine,
+		}),
+	})
+}
+
+func UpsertMemory(ctx context.Context, client *qdrant.Client, collection string, vector []float32, rawText string, advisorName string) error {
+	// Generate a stable ID (using a UUID is standard)
+	pointID := qdrant.NewIDUUID(generateUUID()) 
+
+	// The "Point" structure
+	point := &qdrant.PointStruct{
+		Id:     pointID,
+		Vectors: qdrant.NewVectors(vector...),
+		Payload: qdrant.NewValueMap(map[string]any{
+			"content":  rawText,     // THE GOLDEN RULE: Always keep the source
+			"advisor":  advisorName, // Filter by Gandalf, Vader, etc.
+			"created":  time.Now().Unix(),
+		}),
+	}
+
+	_, err := client.Upsert(ctx, &qdrant.UpsertPoints{
+		CollectionName: collection,
+		Points:         []*qdrant.PointStruct{point},
+	})
+	return err
+}
+
+func InitializeMemory(ctx context.Context, host string) (*qdrant.Client, error) {
+    client, err := qdrant.NewClient(&qdrant.Config{
+        Host: host,
+        Port: 6334, // gRPC port
+    })
+    if err != nil {
+        return nil, err
+    }
+
+    // Ensure the collection exists
+    collectionName := "advisor_memories"
+    exists, _ := client.HasCollection(ctx, collectionName)
+    if !exists {
+        err = client.CreateCollection(ctx, &qdrant.CreateCollection{
+            CollectionName: collectionName,
+            VectorsConfig: qdrant.NewVectorsConfig(&qdrant.VectorParams{
+                Size:     768, 
+                Distance: qdrant.Distance_Cosine,
+            }),
+        })
+    }
+
+    return client, err
+}
+
+func SearchMemory(ctx context.Context, qClient *qdrant.Client, embedder *GeminiEmbedder, query string, advisorFilter string) ([]string, error) {
+	// 1. Convert the Question into a Vector
+	queryVector, err := embedder.GenerateEmbedding(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to embed query: %w", err)
+	}
+
+	// 2. Build the Search Request
+	searchQuery := &qdrant.QueryPoints{
+		CollectionName: "advisor_memories",
+		Query:          qdrant.NewQuery(queryVector...),
+		Limit:          qdrant.Ptr(uint64(3)), // Return top 3 matches
+		WithPayload:    qdrant.NewWithPayload(true),
+	}
+
+	// 3. Optional: Filter by Advisor (Darth Vader shouldn't use Gandalf's notes)
+	if advisorFilter != "" {
+		searchQuery.Filter = &qdrant.Filter{
+			Must: []*qdrant.Condition{
+				qdrant.NewFieldCondition("advisor", qdrant.NewMatchText(advisorFilter)),
+			},
+		}
+	}
+
+	// 4. Execute the Search
+	result, err := qClient.Query(ctx, searchQuery)
+	if err != nil {
+		return nil, fmt.Errorf("qdrant search failed: %w", err)
+	}
+
+	// 5. Extract the "Golden Rule" Raw Text from the Payload
+	var memories []string
+	for _, point := range result {
+		if content, ok := point.Payload["content"]; ok {
+			memories = append(memories, content.GetStringValue())
+		}
+	}
+
+	return memories, nil
+}
+
 func main() {
 	InitRedis() // <-- Call the initialization function here. You need to call this function early in your main()
 	
@@ -913,6 +1014,20 @@ func main() {
 
     // Initialize our specific implementation for vector db embedder
     embedder = &GeminiEmbedder{APIKey: apiKey}
+    
+    ctx := context.Background()
+    
+    // 1. Setup - Call the function from here
+    qClient, err := InitializeMemory(ctx, "localhost")
+    if err != nil {
+        log.Fatalf("Failed to init Qdrant: %v", err)
+    }
+
+    // 2. Business Logic (Task 4.3 - Ingest something)
+    // ... logic to call your embedder and then UpsertMemory ...
+
+    // 3. Business Logic (Task 4.4 - Search something)
+    // ... logic to call SearchMemory ...
 	
 	// POST handler for sending new messages
 	http.HandleFunc("/chat", chatHandler)

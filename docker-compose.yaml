@@ -19,8 +19,8 @@ services:
       - QDRANT_ADDR=qdrant:6334
      # Optional: If your Go app relies on a database, you would define it here
     depends_on:
-    - redis # Ensures Redis starts before the Go backend
-    - qdrant # Ensure Vector DB is up before backend starts
+      - redis # Ensures Redis starts before the Go backend
+      - qdrant # Ensure Vector DB is up before backend starts
     #   - database
 
   # New Redis service for short/long term JSON memory

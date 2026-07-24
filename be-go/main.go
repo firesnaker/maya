@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -912,6 +913,15 @@ func (g *GeminiEmbedder) GenerateEmbedding(ctx context.Context, text string) ([]
 	return result.Embedding.Values, nil
 }
 
+// Helper to generate a basic UUID v4 string for Qdrant points
+func generateUUID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	b[6] = (b[6] & 0x0f) | 0x40 // Version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // Variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+}
+
 func SetupCollection(ctx context.Context, client *qdrant.Client, collectionName string) error {
 	return client.CreateCollection(ctx, &qdrant.CreateCollection{
 		CollectionName: collectionName,
@@ -955,7 +965,30 @@ func InitializeMemory(ctx context.Context, host string) (*qdrant.Client, error) 
 
     // Ensure the collection exists
     collectionName := "advisor_memories"
-    exists, _ := client.HasCollection(ctx, collectionName)
+    
+    // Check existing collections safely via ListCollections
+	//resp, err := client.ListCollections(ctx)
+	//exists := false
+	//if err == nil {
+	//	for _, col := range resp.Collections {
+	//		if col.Name == collectionName {
+	//			exists = true
+	//			break
+	//		}
+	//	}
+	//}
+	// ListCollections returns []string directly in this client version
+	collections, err := client.ListCollections(ctx)
+	exists := false
+	if err == nil {
+		for _, name := range collections {
+			if name == collectionName {
+				exists = true
+				break
+			}
+		}
+	}
+	
     if !exists {
         err = client.CreateCollection(ctx, &qdrant.CreateCollection{
             CollectionName: collectionName,
@@ -964,9 +997,12 @@ func InitializeMemory(ctx context.Context, host string) (*qdrant.Client, error) 
                 Distance: qdrant.Distance_Cosine,
             }),
         })
+        if err != nil {
+			return nil, err
+		}
     }
 
-    return client, err
+    return client, nil
 }
 
 func SearchMemory(ctx context.Context, qClient *qdrant.Client, embedder *GeminiEmbedder, query string, advisorFilter string) ([]string, error) {
@@ -977,10 +1013,11 @@ func SearchMemory(ctx context.Context, qClient *qdrant.Client, embedder *GeminiE
 	}
 
 	// 2. Build the Search Request
+	limit := uint64(3)
 	searchQuery := &qdrant.QueryPoints{
 		CollectionName: "advisor_memories",
 		Query:          qdrant.NewQuery(queryVector...),
-		Limit:          qdrant.Ptr(uint64(3)), // Return top 3 matches
+		Limit:          &limit, // Return top 3 matches
 		WithPayload:    qdrant.NewWithPayload(true),
 	}
 
@@ -988,7 +1025,7 @@ func SearchMemory(ctx context.Context, qClient *qdrant.Client, embedder *GeminiE
 	if advisorFilter != "" {
 		searchQuery.Filter = &qdrant.Filter{
 			Must: []*qdrant.Condition{
-				qdrant.NewFieldCondition("advisor", qdrant.NewMatchText(advisorFilter)),
+				qdrant.NewMatch("advisor", advisorFilter),
 			},
 		}
 	}
@@ -1062,6 +1099,37 @@ func RecursiveSplit(text string, opts ChunkOptions) []string {
 	return chunks
 }
 
+// DISABLED FOR NOW, ENABLE ONCE WE USE CHUNKING
+// IngestDocument handles breaking down a large text into chunks, embedding each, and saving to Qdrant.
+//func IngestDocument(ctx context.Context, client *qdrant.Client, embedder *GeminiEmbedder, collection string, rawDocument string, advisorName string) error {
+	// Step 1: Define your chunking configuration (e.g., 500 chars max, 50 chars overlap)
+//	opts := ChunkOptions{
+//		Size:    500,
+//		Overlap: 50,
+//	}
+
+	// Step 2: Chunk the document using Task 4.1's logic
+//	chunks := RecursiveSplit(rawDocument, opts)
+
+	// Step 3: Loop through each chunk, embed it, and upsert it
+//	for _, chunk := range chunks {
+//		// Generate the 768-dim vector via Gemini (Task 4.2)
+//		vector, err := embedder.GenerateEmbedding(ctx, chunk)
+//		if err != nil {
+//			return fmt.Errorf("failed to embed chunk: %w", err)
+//		}
+//
+//		// Upsert into Qdrant with the Golden Rule payload (Task 4.3)
+//		err = UpsertMemory(ctx, client, collection, vector, chunk, advisorName)
+//		if err != nil {
+//			return fmt.Errorf("failed to upsert chunk: %w", err)
+//		}
+//	}
+//
+//	log.Printf("Successfully ingested document for %s into %d chunks.", advisorName, len(chunks))
+//	return nil
+//}
+
 func main() {
 	InitRedis() // <-- Call the initialization function here. You need to call this function early in your main()
 	
@@ -1077,13 +1145,27 @@ func main() {
     ctx := context.Background()
     
     // 1. Setup - Call the function from here
-    qClient, err := InitializeMemory(ctx, "localhost")
-    if err != nil {
-        log.Fatalf("Failed to init Qdrant: %v", err)
-    }
+    // Read Qdrant host from environment, default to localhost for local 'go run'
+	qdrantHost := os.Getenv("QDRANT_ADDR")
+	if qdrantHost == "" {
+		qdrantHost = "localhost:6334"
+	}
+    
+	qClient, err := InitializeMemory(ctx, qdrantHost)
+	if err != nil {
+		log.Fatalf("Failed to init Qdrant: %v", err)
+	}
+    log.Printf("Connected to Qdrant successfully: %v", qClient != nil)
 
+	// DISABLED FOR NOW, ENABLE ONCE WE USE CHUNKING
     // 2. Business Logic (Task 4.3 - Ingest something)
     // ... logic to call your embedder and then UpsertMemory ...
+    // Example test ingestion for your advisor (Task 4.1 + 4.2 + 4.3 combined loop)
+	//sampleKnowledge := "Gandalf's rule of wisdom: Always look to the East at dawn. Never meddle in the affairs of wizards, for they are subtle and quick to anger."
+	//err = IngestDocument(ctx, qClient, embedder, "advisor_memories", sampleKnowledge, "Gandalf")
+	//if err != nil {
+	//	log.Printf("Warning: Failed to ingest initial knowledge: %v", err)
+	//}
 
     // 3. Business Logic (Task 4.4 - Search something)
     // ... logic to call SearchMemory ...

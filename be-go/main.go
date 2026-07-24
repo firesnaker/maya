@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -470,7 +471,8 @@ func callGeminiAPI(contents []Message) (string, error) { // NEW
 	}
 
 	jsonPayload, _ := json.Marshal(payload)
-	apiUrl := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=%s", geminiAPIKey)
+//	apiUrl := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=%s", geminiAPIKey)
+	apiUrl := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=%s", geminiAPIKey)
 	resp, err := makeAPIRequest(apiUrl, bytes.NewBuffer(jsonPayload))
 	if err != nil {
 		return "", err
@@ -955,10 +957,22 @@ func UpsertMemory(ctx context.Context, client *qdrant.Client, collection string,
 }
 
 func InitializeMemory(ctx context.Context, host string) (*qdrant.Client, error) {
-    client, err := qdrant.NewClient(&qdrant.Config{
-        Host: host,
-        Port: 6334, // gRPC port
-    })
+	// One-liner split using the built-in net package
+	hostStr, portStr, err := net.SplitHostPort(host)
+	if err != nil {
+		return nil, fmt.Errorf("invalid QDRANT_ADDR format: %w", err)
+	}
+
+	// Convert port string to uint32 if your config requires it, or pass directly depending on client config struct
+	// For qdrant.Config, Host is a string and Port is usually an integer. Let's parse it:
+	var port int
+	fmt.Sscanf(portStr, "%d", &port)
+
+	client, err := qdrant.NewClient(&qdrant.Config{
+		Host:                   hostStr,
+		Port:                   port, // gRPC port
+		SkipCompatibilityCheck: true,
+	})
     if err != nil {
         return nil, err
     }
@@ -1150,7 +1164,7 @@ func main() {
 	if qdrantHost == "" {
 		qdrantHost = "localhost:6334"
 	}
-    
+
 	qClient, err := InitializeMemory(ctx, qdrantHost)
 	if err != nil {
 		log.Fatalf("Failed to init Qdrant: %v", err)
